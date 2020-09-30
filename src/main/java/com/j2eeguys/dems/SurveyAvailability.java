@@ -160,7 +160,7 @@ public class SurveyAvailability implements Runnable, Closeable {
       if (this.workerFile != null) {
         new ParseWorkerXLSX(this.workerFile, this.conn).process();
       }
-      final ParseResultXLSX parseResultXLSX = new ParseResultXLSX(this.availabilityFile, this.conn, false);
+      final ParseAvailablityXLSX parseResultXLSX = new ParseAvailablityXLSX(this.availabilityFile, this.conn, false);
       parseResultXLSX.process();
       final CellStyle headerStyle = parseResultXLSX.getHeaderStyle();
       LOGGER.info("Writing.....");

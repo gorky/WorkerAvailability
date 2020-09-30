@@ -22,7 +22,7 @@ import org.apache.poi.ss.usermodel.Workbook;
  * 
  * @author gorky@j2eeguys.com
  */
-public class ParseResultXLSX extends AbstractParserXLSX {
+public class ParseAvailablityXLSX extends AbstractParserXLSX {
 
 
   /**
@@ -40,7 +40,7 @@ public class ParseResultXLSX extends AbstractParserXLSX {
    * @param sourceFile the file being parsed.
    * @param c The Connection to the Database.
    */
-  public ParseResultXLSX(final File sourceFile, final Connection c) {
+  public ParseAvailablityXLSX(final File sourceFile, final Connection c) {
     this(sourceFile, c, true);
     // end <init>
   }
@@ -51,7 +51,7 @@ public class ParseResultXLSX extends AbstractParserXLSX {
    * @param c The Connection to the Database.
    * @param insertMissing Insert a PollWorker's info if not found in the Database.
    */
-  public ParseResultXLSX(final File sourceFile, final Connection c, final boolean insertMissing) {
+  public ParseAvailablityXLSX(final File sourceFile, final Connection c, final boolean insertMissing) {
     super(sourceFile, c);
     this.insertMissing = insertMissing;
     // end <init>
