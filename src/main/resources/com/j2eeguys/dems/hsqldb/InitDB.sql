@@ -1,13 +1,24 @@
 CREATE TABLE WORKER (
     id int identity primary key,
-    VR_ID varchar(25) NOT NULL,
+    VR_ID varchar(25) DEFAULT NULL,
     LAST_NAME varchar(64) NOT NULL,
     FIRST_NAME varchar(64) NOT NULL,
-    PRECINT SMALLINT DEFAULT NULL,
-    ROLE varchar(255) DEFAULT NULL,
+    PRECINCT SMALLINT DEFAULT NULL,
+    ROLE varchar(256) DEFAULT NULL,
+    CITY varchar(256) DEFAULT NULL,
+    PHONE varchar(18) DEFAULT NULL,
+    EMAIL varchar(256) DEFAULT NULL,
+    EXPERIENCED char(1) DEFAULT NULL,
+    LANGUAGES varchar(128) DEFAULT NULL,
+    LOCATION varchar(256) DEFAULT NULL,
+    NOTES varchar(512) DEFAULT NULL,
+    constraint WKR_NAME UNIQUE(LAST_NAME, FIRST_NAME)
 );
+CREATE INDEX WRK_VR_ID ON WORKER (VR_ID);
 
 CREATE TABLE AVAILABILITY (
     id int NOT NULL,
-    DAY DATE NOT NULL,
+    DAY date NOT NULL,
+    foreign key (id) references WORKER(id),
+    constraint PK_AVAILABILITY PRIMARY KEY(id, DAY)
 );

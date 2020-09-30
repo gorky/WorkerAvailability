@@ -4,102 +4,57 @@
 package com.j2eeguys.dems;
 
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.nio.charset.Charset;
 import java.sql.Connection;
 import java.sql.Date;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.Calendar;
-import java.util.Collection;
 
-import org.apache.commons.io.IOUtils;
 import org.apache.poi.ss.usermodel.Cell;
-import org.apache.poi.ss.usermodel.CellStyle;
 import org.apache.poi.ss.usermodel.CellType;
-import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
 import org.apache.poi.ss.usermodel.Workbook;
-import org.apache.poi.ss.usermodel.WorkbookFactory;
-import org.apache.poi.xssf.usermodel.XSSFCell;
-import org.apache.poi.xssf.usermodel.XSSFRow;
-import org.apache.poi.xssf.usermodel.XSSFSheet;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
-import org.apache.poi.xssf.usermodel.XSSFWorkbookFactory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
- * Parses the input XLSX. Loads the data into the Database.
+ * Parses the Availability XLSX. Loads the data into the Database.
  * 
  * @author gorky@j2eeguys.com
  */
-public class ParseResultXLSX {
+public class ParseResultXLSX extends AbstractParserXLSX {
 
-  private static final Logger LOGGER = LoggerFactory.getLogger(ParseResultXLSX.class);
 
   /**
    * Calendar to use for date operations.
    */
   protected final Calendar calendar = Calendar.getInstance();
-
-  /**
-   * Survey file being parsed.
-   */
-  protected final File sourceFile;
   
   /**
-   * Connection URL to the Database.
+   * Insert new Worker Info if missing.
    */
-  protected final String url;
-
-  /**
-   * Header style to be used.  Loaded from the Source Surbery file.
-   */
-  protected CellStyle headerStyle;
+  protected final boolean insertMissing;
 
   /**
    * Constructor for ParseResultXLSX.
-   * @param sourceFile The source survey file to read.
+   * @param sourceFile the file being parsed.
+   * @param c The Connection to the Database.
    */
-  public ParseResultXLSX(final File sourceFile) {
-    if (!sourceFile.exists() && !sourceFile.canRead()) {
-      throw new IllegalArgumentException("Unable to Read " + sourceFile.getAbsolutePath());
-    }
-    this.sourceFile = sourceFile;
-    this.url = "jdbc:hsqldb:mem:result;shutdown=true";
+  public ParseResultXLSX(final File sourceFile, final Connection c) {
+    this(sourceFile, c, true);
     // end <init>
   }
-
+  
   /**
-   * Processes the survey result file.
-   * 
-   * @throws IOException thrown if an exception occurs during processing.
+   * Constructor for ParseResultXLSX.
+   * @param sourceFile the file being parsed.
+   * @param c The Connection to the Database.
+   * @param insertMissing Insert a PollWorker's info if not found in the Database.
    */
-  public void process() throws IOException {
-    try (final XSSFWorkbook workbook = XSSFWorkbookFactory.createWorkbook(this.sourceFile, true);
-        // Prep table
-        final Connection c = prepTable();) {
-      load(workbook, c);
-      //Save Processed Data!
-      try (final Workbook outBook = buildOutput(c);
-          final OutputStream out =
-          new FileOutputStream(new File(this.sourceFile.getParentFile(), "WorkerAvailability.xlsx"));) {
-        outBook.write(out);
-        out.flush();
-      }
-
-    } catch (SQLException e) {
-      throw new IOException(e.getMessage(), e);
-    }
-    // end process
+  public ParseResultXLSX(final File sourceFile, final Connection c, final boolean insertMissing) {
+    super(sourceFile, c);
+    this.insertMissing = insertMissing;
+    // end <init>
   }
   
   /**
@@ -112,29 +67,91 @@ public class ParseResultXLSX {
    * @throws SQLException thrown if the availability information can not be added to the Database.
    */
   protected void insertAvailability(final PreparedStatement insertAvailable, final String sheetName,
-      final Date sheetDate, final XSSFRow row, int id) throws SQLException {
+      final Date sheetDate, final Row row, int id) throws SQLException {
     final String yesValue = row.getCell(5).getStringCellValue();
     if (yesValue != null && yesValue.trim().equals("Checked")) {
       final String noValue = row.getCell(6).getStringCellValue();
       if (noValue != null && noValue.trim().equals("Checked")) {
-        LOGGER.warn("Worker {} has both 'Yes' & 'No' checked for {}",
+        this.LOGGER.warn("Worker {} has both 'Yes' & 'No' checked for {}",
             row.getCell(2).getStringCellValue(), sheetName);
       } else {
         final String vrNum = row.getCell(2).getStringCellValue();
         insertAvailable.setInt(1, id);
         insertAvailable.setDate(2, sheetDate);
-        if (insertAvailable.executeUpdate() != 1) {
-          throw new IllegalStateException("Unable to insert VR " + vrNum + " for Date " + sheetDate);
-        } // end insert
-        LOGGER.debug("Inserted Availability VR# {}/{} for {}:{}", vrNum, Integer.valueOf(id), sheetDate, yesValue);
+        try {
+          if (insertAvailable.executeUpdate() != 1) {
+            throw new IllegalStateException("Unable to insert VR " + vrNum + " for Date " + sheetDate);
+          } // end insert
+          this.LOGGER.debug("Inserted Availability VR# {}/{} for {}:{}", vrNum, Integer.valueOf(id), sheetDate, yesValue);
+        } catch (SQLException e) {
+          this.LOGGER.warn("Exception processing VR# {}/{} for {}={}:{}", vrNum, Integer.valueOf(id), sheetDate, yesValue,e.getMessage());
+        }
       }
     } // end Yes Checked
 
   }
 
   /**
+   * Sets the Worker VR ID.  Also, if not filtering (see {@link #insertMissing}), adds the pollworker info.
+   * @param psIdentity {@link PreparedStatement} to get the DB Id for the worker.  Used for logging/debugging.
+   * @param search The {@link PreparedStatement} to use to see if the Worker is already in the DB.
+   * @param nameSearch The {@link PreparedStatement} to use with just First and Last names to see if the Worker is already in the DB.
+   * @param insertWorker The {@link PreparedStatement} to use to insert the Worker into the DB.
+   * @param updateWorker The {@link PreparedStatement} to use to insert the Worker's VR ID in the DB.
+   * @param row The Row from the Survey sheet with the worker data.
+   * @return the database ID of the worker. -1 if not found and not inserting.
+   * @throws SQLException Thrown if the search or insert fail.
+   */
+  protected int setWorkerInfo(final PreparedStatement psIdentity, final PreparedStatement search,
+      final PreparedStatement nameSearch, final PreparedStatement insertWorker, final PreparedStatement updateWorker, final Row row) throws SQLException {
+    final String vrId = row.getCell(2).getStringCellValue().trim();
+    search.setString(1, vrId);
+    final String lastName = row.getCell(0).getStringCellValue().trim();
+    final String firstName = row.getCell(1).getStringCellValue().trim();
+    if (vrId.trim().length() == 0 || !Character.isDigit(vrId.charAt(0))) {
+      //Empty or non-numeric
+      search.setString(2, lastName);
+      search.setString(3, firstName);
+    } else {
+      //VR # was numeric, and that's unique per person.
+      search.setString(2, "%");
+      search.setString(3, "%");
+    }
+    try (final ResultSet searchResult = search.executeQuery()) {
+      if (!searchResult.next()) {
+        //VR_ID not set?
+        nameSearch.setString(1, lastName);
+        nameSearch.setString(2, firstName);
+        try (final ResultSet nameSearchRS = nameSearch.executeQuery()) {
+          if (!nameSearchRS.next()) {
+            //Name not found.
+            if (this.insertMissing) {
+              return insertWorkerInfo(psIdentity, search, insertWorker, row);
+            }//else, filtering instead of inserting
+            this.LOGGER.debug("{} {} Not found in DB", firstName, lastName);
+            return -1;
+          }//else
+          updateWorker.setString(1, vrId);
+          //Precinct
+          final Cell precinctCell = row.getCell(3);
+          updateWorker.setString(2, precinctCell.getCellType() == CellType.STRING ? precinctCell.getStringCellValue()
+              : Long.toString((long)precinctCell.getNumericCellValue())
+                  );
+          updateWorker.setString(3, row.getCell(4).getStringCellValue());
+          updateWorker.setInt(4, nameSearchRS.getInt(1));
+          int updated = updateWorker.executeUpdate();
+          this.LOGGER.debug("Update VR# {}/Record Count: {}", vrId, Integer.valueOf(updated));
+          return nameSearchRS.getInt(1);
+        }//end try nameSearch
+      } // else
+      return searchResult.getInt(1);
+    }
+    //end setWorkerInfo
+  }
+  
+  /**
    * Inserts the PollWorker Info into the Database.
-   * @param psIdentity 
+   * @param psIdentity {@link PreparedStatement} to get the DB Id for the worker.  Used for logging/debugging.
    * @param search The {@link PreparedStatement} to use to see if the Worker is already in the DB.
    * @param insertWorker The {@link PreparedStatement} to use to insert the Worker into the DB.
    * @param row The Row from the Survey sheet with the worker data.
@@ -142,7 +159,7 @@ public class ParseResultXLSX {
    * @throws SQLException Thrown if the search or insert fail.
    */
   protected int insertWorkerInfo(final PreparedStatement psIdentity, final PreparedStatement search,
-      final PreparedStatement insertWorker, final XSSFRow row) throws SQLException {
+      final PreparedStatement insertWorker, final Row row) throws SQLException {
     final String vrId = row.getCell(2).getStringCellValue().trim();
     search.setString(1, vrId);
     final String lastName = row.getCell(0).getStringCellValue().trim();
@@ -161,7 +178,7 @@ public class ParseResultXLSX {
         insertWorker.setObject(1, vrId);
         insertWorker.setString(2, lastName);
         insertWorker.setString(3, firstName);
-        final XSSFCell precint = row.getCell(3);
+        final Cell precint = row.getCell(3);
         if (precint.getCellType() == CellType.NUMERIC) {
           insertWorker.setInt(4, (int) precint.getNumericCellValue());
         } else {
@@ -179,7 +196,7 @@ public class ParseResultXLSX {
         try (final ResultSet rsId = psIdentity.executeQuery();){
           rsId.next();
           int identity = rsId.getInt(1);
-          LOGGER.debug("Inserted VR# {}/{}", vrId, Integer.valueOf(identity));
+          this.LOGGER.debug("Inserted VR# {}/{}", vrId, Integer.valueOf(identity));
           return identity;
         }
       }//else
@@ -191,23 +208,27 @@ public class ParseResultXLSX {
   /**
    * Load the Survey data from a spreadsheet into the Database.
    * @param workbook The workbook supplying the worker availability data.
-   * @param c the {@link Connection} to the database.
    * @throws SQLException thrown if the data can't be inserted into the Database.
    */
-  protected void load(final XSSFWorkbook workbook, final Connection c) throws SQLException {
+  @Override
+  protected void load(final Workbook workbook) throws SQLException {
     final int sheetCount = workbook.getNumberOfSheets();
-    try (final PreparedStatement search = c.prepareStatement(
-            "SELECT ID FROM WORKER WHERE VR_ID = ? AND LAST_NAME LIKE ? AND FIRST_NAME LIKE ?");
-        final PreparedStatement insertWorker = c.prepareStatement(
-            "INSERT INTO WORKER (VR_ID, LAST_NAME, FIRST_NAME, PRECINT, ROLE) VALUES (?,?,?,?,?)");
+    try (final PreparedStatement search = this.c.prepareStatement(
+            "SELECT ID, VR_ID FROM WORKER WHERE VR_ID = ? AND LAST_NAME LIKE ? AND FIRST_NAME LIKE ?");
+        final PreparedStatement nameSearch = this.c.prepareStatement(
+            "SELECT ID, VR_ID FROM WORKER WHERE VR_ID IS NULL AND LAST_NAME LIKE ? AND FIRST_NAME LIKE ?");
+        final PreparedStatement insertWorker = this.c.prepareStatement(
+            "INSERT INTO WORKER (VR_ID, LAST_NAME, FIRST_NAME, PRECINCT, ROLE) VALUES (?,?,?,?,?)");
+        final PreparedStatement updateWorker =
+            this.c.prepareStatement("UPDATE WORKER SET VR_ID = ?, PRECINCT = ?, ROLE = ? WHERE ID = ?");
         final PreparedStatement insertAvailable =
-            c.prepareStatement("INSERT INTO AVAILABILITY (id, DAY) VALUES (?,?)");
-        final PreparedStatement psIdentity = c.prepareStatement("CALL IDENTITY()");
+            this.c.prepareStatement("INSERT INTO AVAILABILITY (id, DAY) VALUES (?,?)");
+        final PreparedStatement psIdentity = this.c.prepareStatement("CALL IDENTITY()");
         ) {
       for (int i = 0; i < sheetCount; i++) {
-        final XSSFSheet currentSheet = workbook.getSheetAt(i);
+        final Sheet currentSheet = workbook.getSheetAt(i);
         final String sheetName = currentSheet.getSheetName();
-        LOGGER.info("Working day {}", sheetName);
+        this.LOGGER.info("Working day {}", sheetName);
         // Set Month
         this.calendar.set(Calendar.MONTH, Integer.parseInt(sheetName.substring(0, 2)) - 1);
         // SetDate
@@ -215,7 +236,7 @@ public class ParseResultXLSX {
         final Date sheetDate = new Date(this.calendar.getTimeInMillis());
         final int rowCount = currentSheet.getLastRowNum();
         for (int j = 0; j < rowCount; j++) {
-          final XSSFRow row = currentSheet.getRow(j);
+          final Row row = currentSheet.getRow(j);
           if (j == 0) {
             // Header Row, let's do Sanity check
             if (!(row.getCell(0).getStringCellValue().equals("Last Name")
@@ -231,7 +252,7 @@ public class ParseResultXLSX {
                 sb.append(',');
               }
               sb.deleteCharAt(sb.length() - 1);
-              LOGGER.warn("Incorrect Header Order/Missing Headers:\n{}", sb);
+              this.LOGGER.warn("Incorrect Header Order/Missing Headers:\n{}", sb);
               //Skip to inserts.
             } else { //we're good to go.  Update header information and start next row.
               this.headerStyle = row.isFormatted() ? row.getRowStyle() : row.getCell(0).getCellStyle();
@@ -239,16 +260,21 @@ public class ParseResultXLSX {
             }
           }// else
           try {
-            final int id = insertWorkerInfo(psIdentity, search, insertWorker, row);
-            insertAvailability(insertAvailable, sheetName, sheetDate, row, id);
+            final int id = setWorkerInfo(psIdentity, search, nameSearch, insertWorker, updateWorker, row);
+            if (id >= 0) {
+              insertAvailability(insertAvailable, sheetName, sheetDate, row, id);
+            } else {
+              this.LOGGER.info("Skipping {} {}", row.getCell(1).getStringCellValue(),
+                  row.getCell(0).getStringCellValue());
+            }
           } catch (IllegalStateException e) {
-            StringBuilder sb = new StringBuilder(255);
+            final StringBuilder sb = new StringBuilder(255);
             for(int m = 0; m<=6;m++) {
               sb.append(row.getCell(m).getStringCellValue());
               sb.append(',');
             }
             sb.deleteCharAt(sb.length() - 1);
-            LOGGER.warn("Unable to insert data for: {}", sb);
+            this.LOGGER.warn("Unable to insert data for: {}", sb);
             throw e;
           }
         } // end for j
@@ -256,127 +282,5 @@ public class ParseResultXLSX {
     }
   }
 
-  /**
-   * Create the tables to use.
-   * 
-   * @return Connection to the Database
-   * @throws SQLException thrown if the Tables can not be created.
-   * @throws IOException  thrown if the Init SQL Statements can not be
-   *                        loaded/read.
-   */
-  protected Connection prepTable() throws SQLException, IOException {
-    final Connection c = DriverManager.getConnection(this.url, "SA", "");
-    String sql = "";
-    try (final Statement s = c.createStatement();
-        final InputStream initSql = getClass().getResourceAsStream("/com/j2eeguys/dems/hsqldb/InitDB.sql");) {
-      final Collection<String> lines = IOUtils.readLines(
-          initSql, Charset.defaultCharset());
-      for (final String line : lines) {
-        if (line.trim().length() == 0) {
-          // empty line, skip
-          continue;
-        } // else
-        sql += line + '\n';
-        if (line.endsWith(";")) {
-          LOGGER.info("Executing SQL --> {}", sql);
-          s.execute(sql);
-          sql = "";
-          LOGGER.info("Executed");
-        } // end if
-      } // end for
-    } // end try
-
-    return c;
-    // end prepTable
-  }
-
-  /**
-   * Builds the output sheet from the Data in the Database.
-   * @param c the Connection to the Database.
-   * @return Workbook with the Workers availability.
-   * @throws SQLException thrown if data can not be read from the database.
-   * @throws IOException thrown if the output workbook can not be created.
-   */
-  protected Workbook buildOutput(final Connection c) throws SQLException, IOException {
-    final Workbook workbook = WorkbookFactory.create(true);
-    final CellStyle cellStyle = workbook.createCellStyle();
-    cellStyle.cloneStyleFrom(this.headerStyle);
-    this.headerStyle = cellStyle;
-    final CellStyle centerStyle = workbook.createCellStyle();
-    centerStyle.setAlignment(HorizontalAlignment.CENTER);
-    try (final PreparedStatement searchAvailability =
-            c.prepareStatement("SELECT DAY FROM AVAILABILITY WHERE ID = ? AND DAY >= ? AND DAY < ? ORDER BY DAY");
-        final PreparedStatement listWorker = c.prepareStatement(
-            "SELECT LAST_NAME, FIRST_NAME, VR_ID, PRECINT, ROLE, id FROM WORKER ORDER BY LAST_NAME, FIRST_NAME");
-        ) {
-      for (int i = 12; i < 30; i += 7) {
-        final Sheet sheet = workbook.createSheet("Oct " + i + '-' + (i >= 23 ? 30 : i+7));
-        LOGGER.info("Working sheet {}", sheet.getSheetName());
-        addHeader(sheet, i);
-        this.calendar.set(Calendar.DAY_OF_MONTH, i);
-        final Date queryStartDate = new Date(this.calendar.getTimeInMillis());
-        searchAvailability.setDate(2, queryStartDate);
-        this.calendar.set(Calendar.DAY_OF_MONTH, (i >= 23 ? 31 : i+7));
-        final Date queryEndDate = new Date(this.calendar.getTimeInMillis());
-        searchAvailability.setDate(3, queryEndDate);
-        try (final ResultSet rsWorker = listWorker.executeQuery()) {
-          int rowNum = 1;
-          while (rsWorker.next()) {
-            //Load Names
-            final Row workerRow = sheet.createRow(rowNum++);
-            for(int k = 0, l=1; k < 5;k++, l++) {
-              final Cell cell = workerRow.createCell(k);              
-              cell.setCellValue(rsWorker.getString(l));
-            }
-            //Load Availability
-            LOGGER.debug("Loading {}/{}", rsWorker.getString(3), Integer.valueOf(rsWorker.getInt(6)));
-            searchAvailability.setInt(1, rsWorker.getInt(6));
-            try (final ResultSet rsAvailable = searchAvailability.executeQuery();){
-              while(rsAvailable.next()) {
-                final Date day = rsAvailable.getDate(1);
-                LOGGER.debug("Available: {}", day);
-                this.calendar.setTimeInMillis(day.getTime());
-                int dayInMonth = this.calendar.get(Calendar.DAY_OF_MONTH);
-                final Cell cell = workerRow.createCell(dayInMonth - i + 5);
-                //cell.setCellValue(dayInMonth);
-                cell.setCellValue("X");
-                cell.setCellStyle(centerStyle);
-              }
-            }
-          }//end rsWorker
-        }
-      }
-    }
-    return workbook;
-  }
-
-  /**
-   * Add a header row to the Spreadsheet.
-   * @param sheet The Sheet to add the Header row to.
-   * @param start the Starting Date for the Sheet.
-   */
-  protected void addHeader(final Sheet sheet, final int start) {
-    final Row headerRow = sheet.createRow(0);
-    final String[] titles = { "Last Name", "First Name", "VR #", "Precinct", "Role" };
-    this.cellNum = 0;
-    for (final String title : titles) { createHeaderCell(headerRow, title); }
-    for(int i = 0; i < 7 && (start + i) <= 30; i++) {
-      createHeaderCell(headerRow, Integer.toString(start + i));
-    }
-  }
-
-  private int cellNum;
-  
-  /**
-   * Create a header Cell in the row for the columns in the sheet.
-   * @param headerRow The row that the headers/titles are being added to.
-   * @param cellValue The title for the column.
-   */
-  protected void createHeaderCell(final Row headerRow, final String cellValue) {
-    Cell cell = headerRow.createCell(this.cellNum++);
-    cell.setCellStyle(this.headerStyle);
-    cell.setCellValue(cellValue);
-    //end createHeaderCell
-  }
 
 }
